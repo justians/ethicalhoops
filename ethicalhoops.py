@@ -1,5 +1,5 @@
 """
-ethicalhoops.py - Silent background screen question solver with Caps Lock LED signaling.
+ethicalhoops.py - for hooping ethically.
 
 Workflow:
 1. Listens for global trigger hotkey (default: Ctrl+Shift+X) or exit hotkey (default: Ctrl+Shift+Esc).
