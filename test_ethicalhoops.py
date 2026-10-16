@@ -109,6 +109,45 @@ class TestEthicalHoops(unittest.TestCase):
         finally:
             processing_lock.release()
 
+    @patch("ethicalhoops.get_console_window_handle")
+    @patch("ctypes.windll.user32.ShowWindow")
+    def test_hide_console(self, mock_show_window, mock_get_hwnd):
+        """Verify hide_console calls ShowWindow with SW_HIDE."""
+        mock_get_hwnd.return_value = 12345
+        result = ethicalhoops.hide_console()
+        self.assertTrue(result)
+        mock_show_window.assert_called_once_with(12345, ethicalhoops.SW_HIDE)
+
+    @patch("ethicalhoops.get_console_window_handle")
+    @patch("ctypes.windll.user32.ShowWindow")
+    def test_show_console(self, mock_show_window, mock_get_hwnd):
+        """Verify show_console calls ShowWindow with SW_SHOW."""
+        mock_get_hwnd.return_value = 12345
+        result = ethicalhoops.show_console()
+        self.assertTrue(result)
+        mock_show_window.assert_called_once_with(12345, ethicalhoops.SW_SHOW)
+
+    @patch("ethicalhoops.get_console_window_handle")
+    @patch("ctypes.windll.user32.IsWindowVisible")
+    @patch("ethicalhoops.hide_console")
+    @patch("ethicalhoops.show_console")
+    def test_toggle_console(self, mock_show, mock_hide, mock_is_visible, mock_get_hwnd):
+        """Verify toggle_console switches visibility based on current state."""
+        mock_get_hwnd.return_value = 12345
+
+        # When visible -> should hide
+        mock_is_visible.return_value = 1
+        ethicalhoops.toggle_console()
+        mock_hide.assert_called_once()
+        mock_show.assert_not_called()
+
+        # When not visible -> should show
+        mock_hide.reset_mock()
+        mock_is_visible.return_value = 0
+        ethicalhoops.toggle_console()
+        mock_show.assert_called_once()
+        mock_hide.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

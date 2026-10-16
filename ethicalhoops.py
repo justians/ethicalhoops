@@ -35,7 +35,8 @@ from pynput import keyboard
 # Configuration
 # ==============================================================================
 TRIGGER_HOTKEY = "<ctrl>+<shift>+x"
-EXIT_HOTKEY = "<ctrl>+<shift>+<esc>"
+EXIT_HOTKEY = "<ctrl>+<shift>+0"
+HIDE_HOTKEY = "<ctrl>+<shift>+h"
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 # Candidate models to try in order if Google experiences 503 capacity spikes
@@ -59,17 +60,27 @@ SCAN_CAPITAL = 0x45
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 
+# Windows Console Window Control
+SW_HIDE = 0
+SW_SHOW = 5
+
 # Fallback keyboard controller
 _kb_controller = keyboard.Controller()
 
 # Concurrency lock
 processing_lock = threading.Lock()
 
-# Logging setup
+# Logging setup (writes to both console and ethicalhoops.log)
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ethicalhoops.log")
+_log_handlers = [logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a")]
+if sys.stderr:
+    _log_handlers.append(logging.StreamHandler(sys.stderr))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("ethicalhoops")
 
@@ -279,6 +290,82 @@ def flash_error_flutter() -> None:
 
 
 # ==============================================================================
+# Console Window Control (Hide from Desktop / Dock)
+# ==============================================================================
+def get_console_window_handle() -> int:
+    """Returns the HWND of the console window, or 0 if none or non-Windows."""
+    if sys.platform == "win32":
+        try:
+            return ctypes.windll.kernel32.GetConsoleWindow()
+        except Exception:
+            pass
+    return 0
+
+
+def hide_console() -> bool:
+    """
+    Hides the console window so it is not visible on the desktop or dock/taskbar.
+    The script continues to run in the background.
+    """
+    hwnd = get_console_window_handle()
+    if hwnd:
+        ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+        logger.info("Console window hidden into background.")
+        return True
+    return False
+
+
+def show_console() -> bool:
+    """Restores or dynamically allocates the console window to the desktop and dock/taskbar."""
+    hwnd = get_console_window_handle()
+    if not hwnd and sys.platform == "win32":
+        # If running under pythonw.exe without a console window, allocate one on demand!
+        try:
+            if ctypes.windll.kernel32.AllocConsole():
+                sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+                sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+                stream_handler = logging.StreamHandler(sys.stderr)
+                stream_handler.setFormatter(
+                    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+                )
+                logger.addHandler(stream_handler)
+                hwnd = get_console_window_handle()
+                print("=" * 60)
+                print("EthicalHoops Debug Console Attached!")
+                print(f"Log file : {LOG_FILE}")
+                print(f"Hotkeys  : Trigger={TRIGGER_HOTKEY} | Hide/Show={HIDE_HOTKEY} | Exit={EXIT_HOTKEY}")
+                print("=" * 60)
+        except Exception as exc:
+            logger.debug("Failed to allocate console: %s", exc)
+
+    if hwnd:
+        ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
+        try:
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        logger.info("Console window restored.")
+        return True
+    return False
+
+
+def toggle_console() -> None:
+    """Toggles console window visibility between hidden and visible."""
+    hwnd = get_console_window_handle()
+    if not hwnd:
+        show_console()
+        return
+    try:
+        is_visible = bool(ctypes.windll.user32.IsWindowVisible(hwnd))
+        if is_visible:
+            hide_console()
+        else:
+            show_console()
+    except Exception as exc:
+        logger.debug("Failed to toggle console window: %s", exc)
+
+
+# ==============================================================================
 # Pipeline Execution
 # ==============================================================================
 def process_screen_and_signal(client: Optional[genai.Client] = None) -> None:
@@ -350,6 +437,17 @@ def main() -> None:
         help="Run screen capture, answer resolution, and signaling once, then exit.",
     )
     parser.add_argument(
+        "--hide",
+        action="store_true",
+        help="Immediately hide the console window from screen and dock upon starting.",
+    )
+    parser.add_argument(
+        "--auto-hide",
+        type=float,
+        metavar="SECONDS",
+        help="Automatically hide the console window after SECONDS (e.g., --auto-hide 3).",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -409,10 +507,15 @@ def main() -> None:
     print("EthicalHoops is running in the background.")
     print(f" - Trigger hotkey : {TRIGGER_HOTKEY}")
     print(f" - Exit hotkey    : {EXIT_HOTKEY}")
+    print(f" - Toggle window  : {HIDE_HOTKEY}")
     print(f" - Primary model  : {MODEL_NAME}")
     if len(MODELS_TO_TRY) > 1:
         print(f" - Fallback models: {', '.join(MODELS_TO_TRY[1:])}")
     print("=" * 60)
+    print("-" * 60)
+    print(">> Press [Enter] to hide this window (it will stay running silently).")
+    print(f">> Press {HIDE_HOTKEY} at any time to unhide or re-hide.")
+    print("-" * 60)
 
     # Verify Gemini API key is configured or warn user
     if not os.getenv("GEMINI_API_KEY"):
@@ -423,6 +526,34 @@ def main() -> None:
 
     # Event used to signal clean shutdown
     stop_event = threading.Event()
+
+    # Background worker to handle the interactive hide prompt and auto-hide
+    def prompt_hide_worker():
+        try:
+            if args.hide:
+                hide_console()
+                return
+
+            auto_hide_sec = args.auto_hide
+            if auto_hide_sec is None and os.getenv("AUTO_HIDE_SECONDS"):
+                try:
+                    auto_hide_sec = float(os.getenv("AUTO_HIDE_SECONDS"))
+                except ValueError:
+                    auto_hide_sec = None
+
+            if auto_hide_sec is not None and auto_hide_sec >= 0:
+                print(f">> Auto-hiding window in {auto_hide_sec} second(s)...")
+                if not stop_event.wait(auto_hide_sec):
+                    hide_console()
+                return
+
+            if sys.stdin and sys.stdin.isatty():
+                sys.stdin.readline()
+                hide_console()
+        except Exception:
+            pass
+
+    threading.Thread(target=prompt_hide_worker, daemon=True, name="HidePromptWorker").start()
 
     def on_trigger_pressed():
         if not processing_lock.acquire(blocking=False):
@@ -448,6 +579,7 @@ def main() -> None:
     hotkey_bindings = {
         TRIGGER_HOTKEY: on_trigger_pressed,
         EXIT_HOTKEY: on_exit_pressed,
+        HIDE_HOTKEY: toggle_console,
     }
 
     try:
